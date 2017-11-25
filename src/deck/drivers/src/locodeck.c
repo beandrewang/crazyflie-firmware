@@ -63,6 +63,26 @@
 
 #define CS_PIN DECK_GPIO_IO1
 
+// LOCO deck alternative IRQ and RESET pins(IO_2, IO_3) instead of default (RX1, TX1), leaving UART1 free for use
+#ifdef LOCODECK_USE_ALT_PINS
+    #define GPIO_PIN_IRQ 	GPIO_Pin_5
+	#define GPIO_PIN_RESET 	GPIO_Pin_4
+	#define GPIO_PORT		GPIOB
+	#define EXTI_PortSource EXTI_PortSourceGPIOB
+	#define EXTI_PinSource 	EXTI_PinSource5
+	#define EXTI_LineN 		EXTI_Line5
+	#define EXTI_IRQChannel EXTI9_5_IRQn
+#else
+    #define GPIO_PIN_IRQ 	GPIO_Pin_11
+	#define GPIO_PIN_RESET 	GPIO_Pin_10
+	#define GPIO_PORT		GPIOC
+	#define EXTI_PortSource EXTI_PortSourceGPIOC
+	#define EXTI_PinSource 	EXTI_PinSource11
+	#define EXTI_LineN 		EXTI_Line11
+	#define EXTI_IRQChannel EXTI15_10_IRQn
+#endif
+
+
 #if LPS_TDOA_ENABLE
   #define RX_TIMEOUT 10000
 #else
@@ -100,6 +120,11 @@ static lpsAlgoOptions_t algoOptions = {
 #ifdef LPS_TDMA_ENABLE
   .useTdma = true,
   .tdmaSlot = TDMA_SLOT,
+#endif
+#if LPS_TDOA_ENABLE
+  .rangingMode = lpsMode_TDoA,
+#else
+  .rangingMode = lpsMode_TWR,
 #endif
 
   // To set a static anchor position from startup, uncomment and modify the
@@ -181,7 +206,7 @@ static void uwbTask(void* parameters)
     if (xSemaphoreTake(irqSemaphore, timeout/portTICK_PERIOD_MS)) {
       do{
           dwHandleInterrupt(dwm);
-      } while(digitalRead(DECK_GPIO_RX1) != 0);
+      } while(digitalRead(GPIO_PIN_IRQ) != 0);
     } else {
       timeout = algorithm->onEvent(dwm, eventTimeout);
     }
@@ -240,19 +265,23 @@ static void spiRead(dwDevice_t* dev, const void *header, size_t headerLength,
   spiEndTransaction();
 }
 
-void __attribute__((used)) EXTI11_Callback(void)
-{
-  portBASE_TYPE  xHigherPriorityTaskWoken = pdFALSE;
+#if LOCODECK_USE_ALT_PINS
+	void __attribute__((used)) EXTI5_Callback(void)
+#else
+	void __attribute__((used)) EXTI11_Callback(void)
+#endif
+	{
+	  portBASE_TYPE  xHigherPriorityTaskWoken = pdFALSE;
 
-  NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
-  EXTI_ClearITPendingBit(EXTI_Line11);
+	  NVIC_ClearPendingIRQ(EXTI_IRQChannel);
+	  EXTI_ClearITPendingBit(EXTI_LineN);
 
-  //To unlock RadioTask
-  xSemaphoreGiveFromISR(irqSemaphore, &xHigherPriorityTaskWoken);
+	  //To unlock RadioTask
+	  xSemaphoreGiveFromISR(irqSemaphore, &xHigherPriorityTaskWoken);
 
-  if(xHigherPriorityTaskWoken)
-    portYIELD();
-}
+	  if(xHigherPriorityTaskWoken)
+		portYIELD();
+	}
 
 static void spiSetSpeed(dwDevice_t* dev, dwSpiSpeed_t speed)
 {
@@ -290,33 +319,33 @@ static void dwm1000Init(DeckInfo *info)
 
   // Init IRQ input
   bzero(&GPIO_InitStructure, sizeof(GPIO_InitStructure));
-  GPIO_InitStructure.GPIO_Pin = GPIO_Pin_11;
+  GPIO_InitStructure.GPIO_Pin = GPIO_PIN_IRQ;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
   //GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_DOWN;
-  GPIO_Init(GPIOC, &GPIO_InitStructure);
+  GPIO_Init(GPIO_PORT, &GPIO_InitStructure);
 
-  SYSCFG_EXTILineConfig(EXTI_PortSourceGPIOC, EXTI_PinSource11);
+  SYSCFG_EXTILineConfig(EXTI_PortSource, EXTI_PinSource);
 
-  EXTI_InitStructure.EXTI_Line = EXTI_Line11;
+  EXTI_InitStructure.EXTI_Line = EXTI_LineN;
   EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
   EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Rising;
   EXTI_InitStructure.EXTI_LineCmd = ENABLE;
   EXTI_Init(&EXTI_InitStructure);
 
   // Init reset output
-  GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10;
+  GPIO_InitStructure.GPIO_Pin = GPIO_PIN_RESET;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
   GPIO_InitStructure.GPIO_OType = GPIO_OType_OD;
   GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
-  GPIO_Init(GPIOC, &GPIO_InitStructure);
+  GPIO_Init(GPIO_PORT, &GPIO_InitStructure);
 
   // Init CS pin
   pinMode(CS_PIN, OUTPUT);
 
   // Reset the DW1000 chip
-  GPIO_WriteBit(GPIOC, GPIO_Pin_10, 0);
+  GPIO_WriteBit(GPIO_PORT, GPIO_PIN_RESET, 0);
   vTaskDelay(M2T(10));
-  GPIO_WriteBit(GPIOC, GPIO_Pin_10, 1);
+  GPIO_WriteBit(GPIO_PORT, GPIO_PIN_RESET, 1);
   vTaskDelay(M2T(10));
 
   // Initialize the driver
@@ -350,7 +379,7 @@ static void dwm1000Init(DeckInfo *info)
   dwCommitConfiguration(dwm);
 
   // Enable interrupt
-  NVIC_InitStructure.NVIC_IRQChannel = EXTI15_10_IRQn;
+  NVIC_InitStructure.NVIC_IRQChannel = EXTI_IRQChannel;
   NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = NVIC_LOW_PRI;
   NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
   NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
@@ -439,6 +468,11 @@ LOG_ADD(LOG_FLOAT, pressure7, &algoOptions.pressures[7])
 LOG_ADD(LOG_UINT16, state, &algoOptions.rangingState)
 LOG_GROUP_STOP(ranging)
 
+LOG_GROUP_START(loco)
+LOG_ADD(LOG_UINT8, mode, &algoOptions.rangingMode)
+LOG_GROUP_STOP(loco)
+
+
 PARAM_GROUP_START(anchorpos)
 #if (LOCODECK_NR_OF_ANCHORS > 0)
 PARAM_ADD(PARAM_FLOAT, anchor0x, &algoOptions.anchorPosition[0].x)
@@ -483,6 +517,9 @@ PARAM_ADD(PARAM_FLOAT, anchor7z, &algoOptions.anchorPosition[7].z)
 PARAM_ADD(PARAM_UINT8, enable, &algoOptions.combinedAnchorPositionOk)
 PARAM_GROUP_STOP(anchorpos)
 
+PARAM_GROUP_START(deck)
+PARAM_ADD(PARAM_UINT8 | PARAM_RONLY, bcDWM1000, &isInit)
+PARAM_GROUP_STOP(deck)
 
 // Loco Posisioning Protocol (LPP) handling
 
